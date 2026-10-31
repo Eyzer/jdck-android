@@ -45,6 +45,14 @@
             android:layout_weight="1.0"
             android:text="@string/input_btn_text" />
         <Button
+            android:id="@+id/oneKeyBtn"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="4dp"
+            android:layout_marginRight="4dp"
+            android:layout_weight="1.0"
+            android:text="@string/one_key_btn_text" />
+        <Button
                 android:text="@string/get_cookie_btn_text"
                 android:layout_width="0dp"
                 android:layout_weight="1.0"

@@ -3,6 +3,7 @@
     <string name="add_btn_text">添加</string>
     <string name="del_btn_text">删除</string>
     <string name="input_btn_text">输入</string>
+    <string name="one_key_btn_text">一键登录</string>
     <string name="get_cookie_btn_text">获取CK</string>
     <string name="clear_cookie_btn_text">重置</string>
     <string name="confirm_btn_text">添加</string>

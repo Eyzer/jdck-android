@@ -3,8 +3,11 @@ package cn.xanderye.android.jdck.activity;
 import android.app.AlertDialog;
 import android.content.*;
 import android.content.pm.PackageManager;
+import android.net.ConnectivityManager;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.util.Log;
@@ -20,6 +23,7 @@ import cn.xanderye.android.jdck.config.Config;
 import cn.xanderye.android.jdck.entity.QlEnv;
 import cn.xanderye.android.jdck.entity.QlInfo;
 import cn.xanderye.android.jdck.receiver.SMSReceiver;
+import cn.xanderye.android.jdck.util.CkSchedule;
 import cn.xanderye.android.jdck.util.JDUtil;
 import cn.xanderye.android.jdck.util.QinglongUtil;
 import com.alibaba.fastjson.JSON;
@@ -38,7 +42,57 @@ public class MainActivity extends AppCompatActivity {
 
     private Context context;
 
-    private Button addBtn, delBtn, inputBtn, getCookieBtn, clearCookieBtn,sendCK;
+    private Button addBtn, delBtn, inputBtn, getCookieBtn, clearCookieBtn,sendCK, oneKeyBtn;
+
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+
+    private int oneKeyTries;
+
+    /**
+     * 运营商号码认证页自动勾选协议并点击一键登录。
+     * 号码由运营商网关下发，无需填写；页面未渲染出来时返回 no，由 Java 侧重试。
+     */
+    private static final String ONE_KEY_JS =
+            "(function(){"
+            + "var docs=[document];"
+            + "try{for(var f=0;f<window.frames.length;f++){try{if(window.frames[f].document)docs.push(window.frames[f].document);}catch(e){}}}catch(e){}"
+            + "var now=Date.now(),hit=0;"
+            + "for(var i=0;i<docs.length;i++){"
+            + "var doc=docs[i],b=doc.body;if(!b)continue;"
+            + "var t=b.innerText||'';"
+            + "if(t.indexOf('号码认证')<0&&t.indexOf('一键登录')<0)continue;"
+            + "var c=doc.getElementsByClassName('policy_tip-checkbox')[0];"
+            + "var btn=pk(doc,'一键登录')||pk(doc,'本机号码登录');"
+            + "if(!c&&!btn)continue;"
+            + "hit=1;"
+            + "if(window.__jdckT&&now-window.__jdckT<3000)continue;"
+            + "if(c&&!/checked/.test(c.className)&&c.getAttribute('aria-checked')!=='true')c.click();"
+            + "(function(dd){setTimeout(function(){var x=pk(dd,'一键登录')||pk(dd,'本机号码登录');if(x){fillMask(dd);fire(dd,x);}},400);})(doc);"
+            + "}"
+            + "if(hit)window.__jdckT=now;"
+            + "return hit?'ok':'no';"
+            + "function vis(e){return e&&e.offsetParent!==null;}"
+            + "function pk(doc,kw){"
+            + "var n=doc.querySelectorAll('button,a,div,span,p'),best=null;"
+            + "for(var i=0;i<n.length;i++){var e=n[i];if(!vis(e))continue;var s=(e.innerText||'').trim();"
+            + "if(!s||s.length>30||s.indexOf(kw)<0)continue;"
+            + "if(e.children.length===0)return e;if(!best)best=e;}"
+            + "return best;}"
+            + "function fire(doc,x){"
+            + "var b=doc.body,p=x;"
+            + "while(p&&p!==b){var cs=getComputedStyle(p);if(cs.cursor==='pointer'||p.tagName==='BUTTON'||p.tagName==='A')break;p=p.parentElement;}"
+            + "if(!p||p===b)p=x;"
+            + "p.click();}"
+            + "function fillMask(doc){"
+            + "var ph=window.__jdckPhone;if(!ph||ph.length<11)return;"
+            + "var n=doc.querySelectorAll('input'),bx=[];"
+            + "for(var i=0;i<n.length;i++){var e=n[i];if(e.offsetParent===null)continue;"
+            + "var t=(e.getAttribute('type')||'').toLowerCase();"
+            + "if(e.getAttribute('maxlength')==='1'||t==='tel'||t==='number')bx.push(e);}"
+            + "if(bx.length!==4)return;"
+            + "var m=ph.substr(3,4);"
+            + "for(var j=0;j<4;j++){bx[j].value=m.charAt(j);bx[j].dispatchEvent(new Event('input',{bubbles:true}));}}"
+            + "})()";
 
     private Spinner phoneSpinner;
 
@@ -46,11 +100,21 @@ public class MainActivity extends AppCompatActivity {
 
     private static final String JD_URL = "https://home.m.jd.com/myJd/home.action";
 
+    public static final String EXTRA_AUTO_LOGIN = "autoLogin";
+
+    private static final int CK_HOURS = 3;
+
+    private boolean ckCheckEnabled;
+
+    private String lastUploadedKey = "";
+
     private static final Pattern PHONE_PATTERN = Pattern.compile("1\\d{10}");
 
     private SharedPreferences config;
 
     private String cookie = null;
+
+    private String lastFilledUrl = "";
 
     private Set<String> phoneSet = new HashSet<>();
 
@@ -79,6 +143,8 @@ public class MainActivity extends AppCompatActivity {
         webView.getSettings().setJavaScriptEnabled(true);
         webView.getSettings().setDomStorageEnabled(true);
         webView.getSettings().setCacheMode(WebSettings.LOAD_NO_CACHE);
+        // 去掉 wv 标识，否则京东会判定为内嵌浏览器，不下发号码认证入口
+        webView.getSettings().setUserAgentString(webView.getSettings().getUserAgentString().replace("; wv", ""));
         //自适应屏幕
         webView.getSettings().setLoadWithOverviewMode(true);
         resetWebview();
@@ -94,6 +160,9 @@ public class MainActivity extends AppCompatActivity {
                 //添加Cookie获取操作
                 CookieManager cookieManager = CookieManager.getInstance();
                 cookie = cookieManager.getCookie(url);
+                autoFillLogin(url);
+                startOneKeyLogin();
+                uiHandler.postDelayed(MainActivity.this::autoUploadIfNeeded, 1500);
                 super.onPageFinished(view, url);
             }
         });
@@ -151,28 +220,7 @@ public class MainActivity extends AppCompatActivity {
                 Toast.makeText(this, "请先选择账号", Toast.LENGTH_SHORT).show();
                 return;
             }
-            String[] info=  selectedPhone.split(" ");
-            String Phone=info[0];
-            String execJs = "var account='" + Phone + "';";
-            execJs += "document.getElementsByClassName('policy_tip-checkbox')[0].click();";
-            execJs += "var evt=new InputEvent('input',{inputType:'insertText',data:account,dataTransfer:null,isComposing:false});";
-            execJs += "document.getElementById('username').value=account;";
-            execJs += "document.getElementById('username').dispatchEvent(evt);";
-            Matcher matcher = PHONE_PATTERN.matcher(Phone);
-            if (matcher.matches()) {
-                execJs += "document.getElementsByClassName('acc-input mobile J_ping')[0].value=account;";
-                execJs += "document.getElementsByClassName('acc-input mobile J_ping')[0].dispatchEvent(evt);";
-            }
-            if(info.length>1){
-                String Pwd=info[1];
-                execJs += "var password='" + Pwd + "';";
-                execJs += "var evt=new InputEvent('input',{inputType:'insertText',data:password,dataTransfer:null,isComposing:false});";
-                execJs += "document.getElementById('pwd').value=password;";
-                execJs += "document.getElementById('pwd').dispatchEvent(evt);";
-                execJs += "document.querySelector('#app>div>a').click()";
-            }
-
-            webView.loadUrl("javascript:" + execJs);
+            webView.loadUrl("javascript:" + buildInputJs(selectedPhone));
         });
         // 获取cookie按钮
         getCookieBtn = findViewById(R.id.getCookieBtn);
@@ -208,21 +256,155 @@ public class MainActivity extends AppCompatActivity {
             resetWebview();
         });
 
+        // 一键登录按钮
+        oneKeyBtn = findViewById(R.id.oneKeyBtn);
+        oneKeyBtn.setOnClickListener(v -> {
+            if (!isCellular()) {
+                Toast.makeText(this, "号码认证依赖运营商网关，请关闭WIFI使用移动数据", Toast.LENGTH_LONG).show();
+                return;
+            }
+            webView.evaluateJavascript(oneKeyJs(), value ->
+                    Toast.makeText(this, "\"ok\"".equals(value) ? "已触发本机号码认证" : "当前页面无号码认证入口", Toast.LENGTH_SHORT).show());
+        });
+
+        ckCheckEnabled = config.getBoolean("ckCheck", false);
+
         // 检查token有效 同时获取环境变量
         checkQlLogin();
+        // 定时任务判定失效后拉起，直接重载页面走登录
+        if (getIntent().getBooleanExtra(EXTRA_AUTO_LOGIN, false)) {
+            getIntent().removeExtra(EXTRA_AUTO_LOGIN);
+            resetWebview();
+        }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (intent.getBooleanExtra(EXTRA_AUTO_LOGIN, false)) {
+            intent.removeExtra(EXTRA_AUTO_LOGIN);
+            resetWebview();
+        }
     }
 
     @Override
     protected void onDestroy() {
         unregisterSMSReceiver();
+        uiHandler.removeCallbacks(oneKeyTask);
         super.onDestroy();
     }
+
+    /**
+     * 登录成功拿到新cookie后自动上传青龙，同一个pt_key只传一次
+     */
+    private void autoUploadIfNeeded() {
+        Map<String, Object> map = JDUtil.formatCookies(cookie);
+        String ptKey = (String) map.get("pt_key");
+        String ptPin = (String) map.get("pt_pin");
+        if (StringUtils.isAnyBlank(ptKey, ptPin) || ptKey.equals(lastUploadedKey)) {
+            return;
+        }
+        lastUploadedKey = ptKey;
+        QlInfo qlInfo = Config.getInstance().getQlInfo();
+        if (qlInfo == null || qlInfo.getToken() == null) {
+            return;
+        }
+        String selected = (String) phoneSpinner.getSelectedItem();
+        String phone = selected == null ? "" : selected.split(" ")[0];
+        updateCookie("pt_key=" + ptKey + ";pt_pin=" + ptPin + ";", phone);
+    }
+
+    /**
+     * 登录页填号脚本，账号列表里选中的号码自动补全到输入框
+     */
+    private String buildInputJs(String selected) {
+        String[] info = selected.split(" ");
+        String account = info[0];
+        StringBuilder js = new StringBuilder();
+        js.append("var account='").append(account).append("';");
+        js.append("var evt=new InputEvent('input',{inputType:'insertText',data:account,dataTransfer:null,isComposing:false});");
+        js.append("var cb=document.getElementsByClassName('policy_tip-checkbox')[0];");
+        js.append("if(cb&&!/checked/.test(cb.className))cb.click();");
+        js.append("var u=document.getElementById('username');if(u){u.value=account;u.dispatchEvent(evt);}");
+        if (PHONE_PATTERN.matcher(account).matches()) {
+            js.append("var m=document.getElementsByClassName('acc-input mobile J_ping')[0];if(m){m.value=account;m.dispatchEvent(evt);}");
+        }
+        if (info.length > 1) {
+            js.append("var pwd='").append(info[1]).append("';");
+            js.append("var evt2=new InputEvent('input',{inputType:'insertText',data:pwd,dataTransfer:null,isComposing:false});");
+            js.append("var p=document.getElementById('pwd');if(p){p.value=pwd;p.dispatchEvent(evt2);}");
+            js.append("var b=document.querySelector('#app>div>a');if(b)b.click();");
+        }
+        return js.toString();
+    }
+
+    /**
+     * 登录页加载后自动补全选中的手机号，同一地址只填一次，避免盖掉手动输入
+     */
+    private void autoFillLogin(String url) {
+        if (url == null || url.equals(lastFilledUrl) || !url.contains("plogin.m.jd.com")) {
+            return;
+        }
+        String selected = (String) phoneSpinner.getSelectedItem();
+        if (StringUtils.isBlank(selected)) {
+            return;
+        }
+        lastFilledUrl = url;
+        // 等页面脚本渲染出输入框再填
+        uiHandler.postDelayed(() -> webView.evaluateJavascript(buildInputJs(selected), null), 500);
+    }
+
+    /**
+     * 一键登录脚本带上选中的号码，用于补全页面上的掩码输入格
+     */
+    private String oneKeyJs() {
+        String selected = (String) phoneSpinner.getSelectedItem();
+        String phone = selected == null ? "" : selected.split(" ")[0];
+        return "var __jdckPhone='" + phone + "';" + ONE_KEY_JS;
+    }
+
+    /**
+     * 是否走蜂窝网络，号码认证只在移动数据下取得到号码
+     */
+    private boolean isCellular() {
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        NetworkCapabilities nc = cm.getNetworkCapabilities(cm.getActiveNetwork());
+        return nc != null && nc.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR);
+    }
+
+    /**
+     * 页面加载后轮询等待号码认证组件渲染，命中一次即停
+     */
+    private void startOneKeyLogin() {
+        uiHandler.removeCallbacks(oneKeyTask);
+        if (!isCellular()) {
+            return;
+        }
+        oneKeyTries = 0;
+        uiHandler.postDelayed(oneKeyTask, 800);
+    }
+
+    private final Runnable oneKeyTask = new Runnable() {
+        @Override
+        public void run() {
+            if (oneKeyTries++ >= 8) {
+                return;
+            }
+            webView.evaluateJavascript(oneKeyJs(), value -> {
+                if (!"\"ok\"".equals(value)) {
+                    uiHandler.postDelayed(oneKeyTask, 1000);
+                }
+            });
+        }
+    };
 
     public boolean onCreateOptionsMenu(Menu menu) {
         String text = smsEnabled ? "关闭短信识别" : "开启短信识别";
         menu.add(Menu.NONE, 1, 1, "青龙面板");
         menu.add(Menu.NONE, 2, 2, text);
         menu.add(Menu.NONE, 3, 3, "关于");
+        menu.add(Menu.NONE, 4, 4, ckCheckEnabled ? "关闭定时检测CK（每" + CK_HOURS + "小时）" : "开启定时检测CK（每" + CK_HOURS + "小时）");
         return true;
     }
 
@@ -269,6 +451,18 @@ public class MainActivity extends AppCompatActivity {
                     startActivity(intent);
                 });
                 builder.create().show();
+            }
+            break;
+            case 4: {
+                ckCheckEnabled = !ckCheckEnabled;
+                config.edit().putBoolean("ckCheck", ckCheckEnabled).apply();
+                if (ckCheckEnabled) {
+                    CkSchedule.enable(this, CK_HOURS);
+                } else {
+                    CkSchedule.disable(this);
+                }
+                item.setTitle(ckCheckEnabled ? "关闭定时检测CK（每" + CK_HOURS + "小时）" : "开启定时检测CK（每" + CK_HOURS + "小时）");
+                Toast.makeText(this, ckCheckEnabled ? "已开启，每" + CK_HOURS + "小时检测一次，失效自动拉起登录" : "已关闭定时检测", Toast.LENGTH_LONG).show();
             }
             break;
         }
