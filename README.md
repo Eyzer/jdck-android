@@ -64,4 +64,4 @@ node tools/selfcheck-onekey.js
 
 ## 界面展示
 
-![](doc/gui.jpg)
+![截图](https://picui.ogmua.cn/s1/2026/10/31/6ae5b8d873f08.webp)
