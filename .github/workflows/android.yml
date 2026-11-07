@@ -5,6 +5,9 @@ on:
     branches: [ master, main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -40,3 +43,14 @@ jobs:
           name: jdck-debug
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: warn
+
+      # 把 APK 发到 Release，手机和电脑都能直接下载，不用登录 Actions
+      - name: Publish APK to Release
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(grep -oP 'versionName "\K[^"]+' app/build.gradle)
+          TAG="v$VERSION"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "jdck $TAG" --notes "CI 自动构建，含后台自动登录"
+          gh release upload "$TAG" app/build/outputs/apk/debug/app-debug.apk#jdck-$VERSION.apk --clobber
