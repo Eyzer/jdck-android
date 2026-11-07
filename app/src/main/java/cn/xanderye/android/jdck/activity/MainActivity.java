@@ -23,8 +23,10 @@ import cn.xanderye.android.jdck.config.Config;
 import cn.xanderye.android.jdck.entity.QlEnv;
 import cn.xanderye.android.jdck.entity.QlInfo;
 import cn.xanderye.android.jdck.receiver.SMSReceiver;
+import cn.xanderye.android.jdck.util.AppState;
 import cn.xanderye.android.jdck.util.CkSchedule;
 import cn.xanderye.android.jdck.util.JDUtil;
+import cn.xanderye.android.jdck.util.JsUtil;
 import cn.xanderye.android.jdck.util.QinglongUtil;
 import com.alibaba.fastjson.JSON;
 import org.apache.commons.lang3.StringUtils;
@@ -49,51 +51,8 @@ public class MainActivity extends AppCompatActivity {
     private int oneKeyTries;
 
     /**
-     * 运营商号码认证页自动勾选协议并点击一键登录。
-     * 号码由运营商网关下发，无需填写；页面未渲染出来时返回 no，由 Java 侧重试。
+     * 运营商号码认证页的注入脚本统一放在 JsUtil，后台 Service 也用同一份
      */
-    private static final String ONE_KEY_JS =
-            "(function(){"
-            + "var docs=[document];"
-            + "try{for(var f=0;f<window.frames.length;f++){try{if(window.frames[f].document)docs.push(window.frames[f].document);}catch(e){}}}catch(e){}"
-            + "var now=Date.now(),hit=0;"
-            + "for(var i=0;i<docs.length;i++){"
-            + "var doc=docs[i],b=doc.body;if(!b)continue;"
-            + "var t=b.innerText||'';"
-            + "if(t.indexOf('号码认证')<0&&t.indexOf('一键登录')<0)continue;"
-            + "var c=doc.getElementsByClassName('policy_tip-checkbox')[0];"
-            + "var btn=pk(doc,'一键登录')||pk(doc,'本机号码登录');"
-            + "if(!c&&!btn)continue;"
-            + "hit=1;"
-            + "if(window.__jdckT&&now-window.__jdckT<3000)continue;"
-            + "if(c&&!/checked/.test(c.className)&&c.getAttribute('aria-checked')!=='true')c.click();"
-            + "(function(dd){setTimeout(function(){var x=pk(dd,'一键登录')||pk(dd,'本机号码登录');if(x){fillMask(dd);fire(dd,x);}},400);})(doc);"
-            + "}"
-            + "if(hit)window.__jdckT=now;"
-            + "return hit?'ok':'no';"
-            + "function vis(e){return e&&e.offsetParent!==null;}"
-            + "function pk(doc,kw){"
-            + "var n=doc.querySelectorAll('button,a,div,span,p'),best=null;"
-            + "for(var i=0;i<n.length;i++){var e=n[i];if(!vis(e))continue;var s=(e.innerText||'').trim();"
-            + "if(!s||s.length>30||s.indexOf(kw)<0)continue;"
-            + "if(e.children.length===0)return e;if(!best)best=e;}"
-            + "return best;}"
-            + "function fire(doc,x){"
-            + "var b=doc.body,p=x;"
-            + "while(p&&p!==b){var cs=getComputedStyle(p);if(cs.cursor==='pointer'||p.tagName==='BUTTON'||p.tagName==='A')break;p=p.parentElement;}"
-            + "if(!p||p===b)p=x;"
-            + "p.click();}"
-            + "function fillMask(doc){"
-            + "var ph=window.__jdckPhone;if(!ph||ph.length<11)return;"
-            + "var n=doc.querySelectorAll('input'),bx=[];"
-            + "for(var i=0;i<n.length;i++){var e=n[i];if(e.offsetParent===null)continue;"
-            + "var t=(e.getAttribute('type')||'').toLowerCase();"
-            + "if(e.getAttribute('maxlength')==='1'||t==='tel'||t==='number')bx.push(e);}"
-            + "if(bx.length!==4)return;"
-            + "var m=ph.substr(3,4);"
-            + "for(var j=0;j<4;j++){bx[j].value=m.charAt(j);bx[j].dispatchEvent(new Event('input',{bubbles:true}));}}"
-            + "})()";
-
     private Spinner phoneSpinner;
 
     private WebView webView;
@@ -105,8 +64,6 @@ public class MainActivity extends AppCompatActivity {
     private static final int CK_HOURS = 3;
 
     private boolean ckCheckEnabled;
-
-    private String lastUploadedKey = "";
 
     private static final Pattern PHONE_PATTERN = Pattern.compile("1\\d{10}");
 
@@ -174,6 +131,20 @@ public class MainActivity extends AppCompatActivity {
             phoneSet = new HashSet<>(Arrays.asList(phones));
             updatePhone();
         }
+        // 记住选中的账号，后台自动登录用它取号码和密码
+        phoneSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                Object selected = parent.getSelectedItem();
+                if (selected != null) {
+                    config.edit().putString("selectedPhone", selected.toString()).apply();
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
         // 添加按钮
         addBtn = findViewById(R.id.addBtn);
         addBtn.setOnClickListener(v -> {
@@ -268,6 +239,10 @@ public class MainActivity extends AppCompatActivity {
         });
 
         ckCheckEnabled = config.getBoolean("ckCheck", false);
+        if (ckCheckEnabled) {
+            // 服务已在跑时不会重复检测，进程被杀后由这里恢复
+            CkSchedule.startService(this);
+        }
 
         // 检查token有效 同时获取环境变量
         checkQlLogin();
@@ -289,6 +264,18 @@ public class MainActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onResume() {
+        AppState.foreground = true;
+        super.onResume();
+    }
+
+    @Override
+    protected void onPause() {
+        AppState.foreground = false;
+        super.onPause();
+    }
+
+    @Override
     protected void onDestroy() {
         unregisterSMSReceiver();
         uiHandler.removeCallbacks(oneKeyTask);
@@ -302,10 +289,10 @@ public class MainActivity extends AppCompatActivity {
         Map<String, Object> map = JDUtil.formatCookies(cookie);
         String ptKey = (String) map.get("pt_key");
         String ptPin = (String) map.get("pt_pin");
-        if (StringUtils.isAnyBlank(ptKey, ptPin) || ptKey.equals(lastUploadedKey)) {
+        if (StringUtils.isAnyBlank(ptKey, ptPin) || ptKey.equals(config.getString("lastUploadedKey", ""))) {
             return;
         }
-        lastUploadedKey = ptKey;
+        config.edit().putString("lastUploadedKey", ptKey).apply();
         QlInfo qlInfo = Config.getInstance().getQlInfo();
         if (qlInfo == null || qlInfo.getToken() == null) {
             return;
@@ -319,24 +306,7 @@ public class MainActivity extends AppCompatActivity {
      * 登录页填号脚本，账号列表里选中的号码自动补全到输入框
      */
     private String buildInputJs(String selected) {
-        String[] info = selected.split(" ");
-        String account = info[0];
-        StringBuilder js = new StringBuilder();
-        js.append("var account='").append(account).append("';");
-        js.append("var evt=new InputEvent('input',{inputType:'insertText',data:account,dataTransfer:null,isComposing:false});");
-        js.append("var cb=document.getElementsByClassName('policy_tip-checkbox')[0];");
-        js.append("if(cb&&!/checked/.test(cb.className))cb.click();");
-        js.append("var u=document.getElementById('username');if(u){u.value=account;u.dispatchEvent(evt);}");
-        if (PHONE_PATTERN.matcher(account).matches()) {
-            js.append("var m=document.getElementsByClassName('acc-input mobile J_ping')[0];if(m){m.value=account;m.dispatchEvent(evt);}");
-        }
-        if (info.length > 1) {
-            js.append("var pwd='").append(info[1]).append("';");
-            js.append("var evt2=new InputEvent('input',{inputType:'insertText',data:pwd,dataTransfer:null,isComposing:false});");
-            js.append("var p=document.getElementById('pwd');if(p){p.value=pwd;p.dispatchEvent(evt2);}");
-            js.append("var b=document.querySelector('#app>div>a');if(b)b.click();");
-        }
-        return js.toString();
+        return JsUtil.fillLoginJs(selected);
     }
 
     /**
@@ -361,7 +331,7 @@ public class MainActivity extends AppCompatActivity {
     private String oneKeyJs() {
         String selected = (String) phoneSpinner.getSelectedItem();
         String phone = selected == null ? "" : selected.split(" ")[0];
-        return "var __jdckPhone='" + phone + "';" + ONE_KEY_JS;
+        return JsUtil.oneKeyJs(phone);
     }
 
     /**
@@ -404,8 +374,34 @@ public class MainActivity extends AppCompatActivity {
         menu.add(Menu.NONE, 1, 1, "青龙面板");
         menu.add(Menu.NONE, 2, 2, text);
         menu.add(Menu.NONE, 3, 3, "关于");
-        menu.add(Menu.NONE, 4, 4, ckCheckEnabled ? "关闭定时检测CK（每" + CK_HOURS + "小时）" : "开启定时检测CK（每" + CK_HOURS + "小时）");
+        menu.add(Menu.NONE, 4, 4, item4Text());
         return true;
+    }
+
+    private String item4Text() {
+        return ckCheckEnabled
+                ? "关闭后台自动登录（每" + CK_HOURS + "小时检测CK）"
+                : "开启后台自动登录（每" + CK_HOURS + "小时检测CK）";
+    }
+
+    /**
+     * 后台自动登录开关：前台服务里静默加载登录页，不走 startActivity，所以后台也能跑
+     */
+    private void toggleAutoLogin() {
+        ckCheckEnabled = !ckCheckEnabled;
+        config.edit().putBoolean("ckCheck", ckCheckEnabled).apply();
+        if (ckCheckEnabled) {
+            CkSchedule.enable(this, CK_HOURS);
+        } else {
+            CkSchedule.disable(this);
+        }
+        invalidateOptionsMenu();
+        if (ckCheckEnabled) {
+            Toast.makeText(this, "已开启：每" + CK_HOURS + "小时检测一次，CK失效后在后台自动登录并推送青龙。"
+                    + "请同时允许自启动、关闭电池优化。", Toast.LENGTH_LONG).show();
+        } else {
+            Toast.makeText(this, "已关闭后台自动登录", Toast.LENGTH_LONG).show();
+        }
     }
 
     public boolean onOptionsItemSelected(MenuItem item){
@@ -454,15 +450,19 @@ public class MainActivity extends AppCompatActivity {
             }
             break;
             case 4: {
-                ckCheckEnabled = !ckCheckEnabled;
-                config.edit().putBoolean("ckCheck", ckCheckEnabled).apply();
-                if (ckCheckEnabled) {
-                    CkSchedule.enable(this, CK_HOURS);
-                } else {
-                    CkSchedule.disable(this);
+                if (!ckCheckEnabled && !Settings.canDrawOverlays(this)) {
+                    AlertDialog.Builder builder = new AlertDialog.Builder(context);
+                    builder.setTitle("需要悬浮窗权限");
+                    builder.setMessage("后台自动登录会在你看不到的小悬浮窗里加载京东登录页。"
+                            + "不给权限也可能成功，但概率低很多。授权后请再点一次菜单开启。");
+                    builder.setPositiveButton("去授权", (dialog, which) ->
+                            startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:" + getPackageName()))));
+                    builder.setNegativeButton("仍然开启", (dialog, which) -> toggleAutoLogin());
+                    builder.create().show();
+                    break;
                 }
-                item.setTitle(ckCheckEnabled ? "关闭定时检测CK（每" + CK_HOURS + "小时）" : "开启定时检测CK（每" + CK_HOURS + "小时）");
-                Toast.makeText(this, ckCheckEnabled ? "已开启，每" + CK_HOURS + "小时检测一次，失效自动拉起登录" : "已关闭定时检测", Toast.LENGTH_LONG).show();
+                toggleAutoLogin();
             }
             break;
         }

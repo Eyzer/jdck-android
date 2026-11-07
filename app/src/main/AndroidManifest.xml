@@ -4,8 +4,15 @@
 
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <uses-permission android:name="android.permission.READ_SMS" />
+    <!-- 后台自动维护 CK：前台服务 + 悬浮窗内静默加载登录页 + 定时唤醒 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
 
     <application
             android:allowBackup="true"
@@ -23,6 +30,24 @@
         </activity>
         <activity android:name=".activity.LoginActivity" android:label="@string/ql_login_name">
         </activity>
+
+        <service
+                android:name=".service.AutoLoginService"
+                android:exported="false"
+                android:foregroundServiceType="dataSync"
+                android:stopWithTask="false"/>
+
+        <receiver android:name=".receiver.CheckAlarmReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="cn.xanderye.android.jdck.CHECK_ALARM"/>
+            </intent-filter>
+        </receiver>
+
+        <receiver android:name=".receiver.BootReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+            </intent-filter>
+        </receiver>
         <!--<receiver android:name=".receiver.SMSReceiver">
             <intent-filter  android:priority="1000">
                 <action android:name="android.provider.Telephony.SMS_RECEIVED"/>

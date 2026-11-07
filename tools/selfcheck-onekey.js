@@ -1,10 +1,10 @@
 // 一键登录注入脚本自检（无需安卓环境）：node tools/selfcheck-onekey.js
-// 直接读取 MainActivity 里的 ONE_KEY_JS，用假 DOM 验证「勾选协议 + 点登录 + 补全掩码格」
+// 直接读取 JsUtil 里的 ONE_KEY_JS，用假 DOM 验证「勾选协议 + 点登录 + 补全掩码格」
 const fs = require('fs');
 const path = require('path');
 
-const src = fs.readFileSync(path.join(__dirname, '../app/src/main/java/cn/xanderye/android/jdck/activity/MainActivity.java'), 'utf8');
-const JS = [...src.split('private static final String ONE_KEY_JS =')[1].split('private Spinner')[0].matchAll(/"([^"]*)"/g)].map(m => m[1]).join('');
+const src = fs.readFileSync(path.join(__dirname, '../app/src/main/java/cn/xanderye/android/jdck/util/JsUtil.java'), 'utf8');
+const JS = [...src.split('private static final String ONE_KEY_JS =')[1].split('public static String oneKeyJs')[0].matchAll(/"([^"]*)"/g)].map(m => m[1]).join('');
 
 class E {
   constructor(tag, txt, cls, attrs) {
