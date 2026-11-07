@@ -16,20 +16,27 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
-
-      - name: Accept SDK licenses
-        run: yes | sdkmanager --licenses || true
-
+      # 直接用 runner 自带的 Android SDK，避免三方 action 初始化失败
       - name: Install SDK platform and build tools
-        run: sdkmanager "platforms;android-30" "build-tools;33.0.1" "platform-tools"
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "SDK root: $SDK_ROOT"
+          SDKM="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKM" ]; then
+            SDKM="$(find "$SDK_ROOT" -name sdkmanager -type f 2>/dev/null | head -n1)"
+          fi
+          echo "sdkmanager: $SDKM"
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          "$SDKM" "platforms;android-30" "build-tools;33.0.1" "platform-tools"
 
       - name: Build debug APK
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
+          ./gradlew assembleDebug --no-daemon --stacktrace
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: jdck-debug
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
