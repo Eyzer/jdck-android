@@ -224,10 +224,10 @@ public class AutoLoginService extends Service {
 
     private void doCheck() {
         String cookie = snapshotCookie();
-        Map<String, Object> map = JDUtil.formatCookies(cookie);
+        Map<String, Object> cookieMap = JDUtil.formatCookies(cookie);
         LogUtil.i("读取Cookie: 长度=" + cookie.length()
-                + " pt_key=" + LogUtil.mask((String) map.get("pt_key"))
-                + " pt_pin=" + LogUtil.mask((String) map.get("pt_pin")));
+                + " pt_key=" + LogUtil.mask((String) cookieMap.get("pt_key"))
+                + " pt_pin=" + LogUtil.mask((String) cookieMap.get("pt_pin")));
         io.execute(() -> {
             boolean valid = CkUtil.isValid(cookie);
             LogUtil.i("CK校验结果 valid=" + valid);
