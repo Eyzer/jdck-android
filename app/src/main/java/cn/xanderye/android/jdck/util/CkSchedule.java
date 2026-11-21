@@ -9,7 +9,6 @@ import androidx.core.content.ContextCompat;
 import androidx.work.WorkManager;
 import cn.xanderye.android.jdck.receiver.CheckAlarmReceiver;
 import cn.xanderye.android.jdck.service.AutoLoginService;
-
 /**
  * 后台自动登录的开关与定时唤醒
  */
@@ -39,6 +38,8 @@ public class CkSchedule {
     }
 
     public static void enable(Context ctx, int hours) {
+        LogUtil.init(ctx);
+        LogUtil.i("开启后台自动登录，间隔=" + hours + "h");
         ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit()
                 .putBoolean(PREF_ENABLED, true)
                 .putInt(PREF_HOURS, hours)
@@ -53,6 +54,8 @@ public class CkSchedule {
     }
 
     public static void disable(Context ctx) {
+        LogUtil.init(ctx);
+        LogUtil.i("关闭后台自动登录");
         ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
                 .edit().putBoolean(PREF_ENABLED, false).apply();
         cancelAlarm(ctx);
@@ -64,6 +67,8 @@ public class CkSchedule {
     }
 
     public static void startService(Context ctx) {
+        LogUtil.init(ctx);
+        LogUtil.i("启动自动维护服务");
         ContextCompat.startForegroundService(ctx, new Intent(ctx, AutoLoginService.class));
     }
 
@@ -73,6 +78,8 @@ public class CkSchedule {
             return;
         }
         long trigger = System.currentTimeMillis() + Math.max(1, hours) * 3600_000L;
+        LogUtil.i("设置定时唤醒，下次=" + new java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.CHINA)
+                .format(new java.util.Date(trigger)));
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, alarmIntent(ctx));
@@ -81,6 +88,7 @@ public class CkSchedule {
             }
         } catch (SecurityException e) {
             // 没拿到精确闹钟权限时退回允许休眠唤醒的非精确闹钟
+            LogUtil.e("精确闹钟无权限，改用非精确闹钟", e);
             am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, alarmIntent(ctx));
         }
     }

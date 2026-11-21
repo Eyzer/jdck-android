@@ -9,8 +9,8 @@ android {
         applicationId "cn.xanderye.android.jdck"
         minSdkVersion 24
         targetSdkVersion 30
-        versionCode 6
-        versionName "2.5.0"
+        versionCode 7
+        versionName "2.5.1"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 

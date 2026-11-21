@@ -17,6 +17,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.WindowManager;
@@ -36,6 +37,7 @@ import cn.xanderye.android.jdck.util.CkSchedule;
 import cn.xanderye.android.jdck.util.CkUtil;
 import cn.xanderye.android.jdck.util.JDUtil;
 import cn.xanderye.android.jdck.util.JsUtil;
+import cn.xanderye.android.jdck.util.LogUtil;
 import cn.xanderye.android.jdck.util.QinglongUtil;
 import com.alibaba.fastjson.JSON;
 import org.apache.commons.lang3.StringUtils;
@@ -95,6 +97,10 @@ public class AutoLoginService extends Service {
 
     private boolean oneKeyFired;
 
+    private String lastPageUrl = "";
+
+    private String lastPageState = "";
+
     private String lastAlertKey = "";
 
     private ConnectivityManager connectivityManager;
@@ -104,6 +110,7 @@ public class AutoLoginService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        LogUtil.init(this);
         config = getSharedPreferences(PREF, Context.MODE_PRIVATE);
         createChannels();
     }
@@ -116,26 +123,83 @@ public class AutoLoginService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        LogUtil.i("服务启动 action=" + (intent == null ? "null(系统重启)" : intent.getAction())
+                + " 状态 checking=" + checking + " loggingIn=" + loggingIn);
+        logEnvironment();
         // 先转前台，避免 startForegroundService 后 5 秒内没转前台被系统判定超时
         startForeground(NOTIFY_FG, buildNotification(false, "京东CK自动维护中", "正在检测京东CK…"));
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            LogUtil.i("收到停止指令");
             stopSelf();
             return START_NOT_STICKY;
         }
         if (!CkSchedule.isEnabled(this)) {
+            LogUtil.i("后台自动登录开关未开启，服务退出");
             stopSelf();
             return START_NOT_STICKY;
         }
         if (!checking && !loggingIn) {
             runCheck();
+        } else {
+            LogUtil.i("已有任务进行中，跳过本次触发");
         }
         return START_STICKY;
+    }
+
+    /**
+     * 记录当前环境，失败复盘时第一时间看这里
+     */
+    private void logEnvironment() {
+        boolean overlay = Settings.canDrawOverlays(this);
+        boolean ignoreBattery = false;
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            ignoreBattery = pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+        } catch (Exception ignored) {
+        }
+        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        boolean notify = nm == null || nm.areNotificationsEnabled();
+        String account = selectedAccount();
+        LogUtil.i("环境: 网络=" + networkType()
+                + " 悬浮窗=" + overlay
+                + " 通知=" + notify
+                + " 忽略电池优化=" + ignoreBattery
+                + " 后台开关=" + CkSchedule.isEnabled(this)
+                + " 账号=" + (StringUtils.isBlank(account) ? "未配置" : maskPhone(phoneOf(account)))
+                + " 间隔=" + CkSchedule.hours(this) + "h");
+    }
+
+    private String networkType() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            NetworkCapabilities nc = cm.getNetworkCapabilities(cm.getActiveNetwork());
+            if (nc == null) {
+                return "NONE";
+            }
+            if (nc.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                return "CELLULAR";
+            }
+            if (nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                return "WIFI";
+            }
+            return "OTHER";
+        } catch (Exception e) {
+            return "ERR:" + e.getMessage();
+        }
+    }
+
+    private String maskPhone(String phone) {
+        if (phone == null || phone.length() < 7) {
+            return "***";
+        }
+        return phone.substring(0, 3) + "****" + phone.substring(phone.length() - 4);
     }
 
     public static final String ACTION_STOP = "cn.xanderye.android.jdck.STOP";
 
     @Override
     public void onDestroy() {
+        LogUtil.i("服务销毁");
         main.removeCallbacksAndMessages(null);
         releaseCellular();
         removeOverlay();
@@ -153,14 +217,20 @@ public class AutoLoginService extends Service {
         checking = true;
         updateForeground("正在检测京东CK…");
         ensureWebView();
+        LogUtil.i("开始检测CK");
         // WebView 的 Cookie 库是异步初始化的，稍等一下再读，避免拿到空 Cookie 误判失效
         main.postDelayed(this::doCheck, 800);
     }
 
     private void doCheck() {
         String cookie = snapshotCookie();
+        Map<String, Object> map = JDUtil.formatCookies(cookie);
+        LogUtil.i("读取Cookie: 长度=" + cookie.length()
+                + " pt_key=" + LogUtil.mask((String) map.get("pt_key"))
+                + " pt_pin=" + LogUtil.mask((String) map.get("pt_pin")));
         io.execute(() -> {
             boolean valid = CkUtil.isValid(cookie);
+            LogUtil.i("CK校验结果 valid=" + valid);
             main.post(() -> {
                 checking = false;
                 if (valid) {
@@ -178,6 +248,7 @@ public class AutoLoginService extends Service {
                     scheduleNext();
                 } else if (AppState.foreground) {
                     // 用户正在看 App，不抢他的登录页；退到后台后再自动登录
+                    LogUtil.i("CK失效，但App在前台，30秒后再尝试");
                     updateForeground("CK已失效，退到后台后自动登录…");
                     main.postDelayed(() -> {
                         if (!loggingIn && !checking && !AppState.foreground) {
@@ -187,6 +258,7 @@ public class AutoLoginService extends Service {
                         }
                     }, 30000);
                 } else {
+                    LogUtil.i("CK失效，开始后台自动登录");
                     startLogin();
                 }
             });
@@ -218,11 +290,16 @@ public class AutoLoginService extends Service {
         loggingIn = true;
         filledThisLogin = false;
         oneKeyFired = false;
+        lastPageUrl = "";
+        lastPageState = "";
         loginDeadline = System.currentTimeMillis() + LOGIN_TIMEOUT_MS;
 
         ensureWebView();
-        attachOverlay();
+        boolean overlay = attachOverlay();
         bindCellular();
+        LogUtil.i("登录准备: 悬浮窗=" + (overlay ? "已添加" : "添加失败/无权限")
+                + " 网络=" + networkType()
+                + " 号码=" + maskPhone(phoneOf(selectedAccount())));
         updateForeground("CK已失效，正在后台自动登录…");
 
         CookieManager cookieManager = CookieManager.getInstance();
@@ -234,6 +311,7 @@ public class AutoLoginService extends Service {
             }
             cookieManager.flush();
             webView.clearCache(true);
+            LogUtil.i("已清空Cookie，加载登录页 " + JD_URL);
             webView.loadUrl(JD_URL);
             main.postDelayed(loginPoll, 2000);
             // 兜底：页面脚本卡住时也要收尾，避免服务一直停在登录中
@@ -274,18 +352,27 @@ public class AutoLoginService extends Service {
                 if (!loggingIn) {
                     return;
                 }
+                String url = webView.getUrl();
+                if (!String.valueOf(url).equals(lastPageUrl) || !String.valueOf(state).equals(lastPageState)) {
+                    lastPageUrl = String.valueOf(url);
+                    lastPageState = String.valueOf(state);
+                    LogUtil.i("页面变化 url=" + url + " state=" + state);
+                }
                 if ("\"captcha\"".equals(state)) {
                     giveUp("京东要求安全验证，需要手动处理");
                     return;
                 }
-                String url = webView.getUrl();
                 if (!filledThisLogin && url != null && url.contains("plogin.m.jd.com")) {
                     filledThisLogin = true;
+                    LogUtil.i("进入登录页，填充账号");
                     webView.evaluateJavascript(JsUtil.fillLoginJs(account), null);
                 }
                 // JS 内部有 3 秒节流，这里持续重试即可
                 webView.evaluateJavascript(JsUtil.oneKeyJs(phoneOf(account)), value -> {
                     if ("\"ok\"".equals(value)) {
+                        if (!oneKeyFired) {
+                            LogUtil.i("已触发运营商本机号码认证");
+                        }
                         oneKeyFired = true;
                         updateForeground("已触发运营商本机号码认证，等待登录结果…");
                     }
@@ -302,6 +389,8 @@ public class AutoLoginService extends Service {
         main.removeCallbacks(loginPoll);
         main.removeCallbacks(loginTimeout);
         CookieManager.getInstance().flush();
+        LogUtil.i("登录成功 pt_key=" + LogUtil.mask(ptKey) + " pt_pin=" + LogUtil.mask(ptPin)
+                + " cookie长度=" + cookie.length());
         config.edit().putString(PK_LAST_COOKIE, cookie).apply();
         releaseCellular();
         removeOverlay();
@@ -313,6 +402,11 @@ public class AutoLoginService extends Service {
         loggingIn = false;
         main.removeCallbacks(loginPoll);
         main.removeCallbacks(loginTimeout);
+        LogUtil.e("自动登录失败: " + reason
+                + " | 当前URL=" + (webView == null ? "null" : webView.getUrl())
+                + " | 网络=" + networkType()
+                + " | 已触发一键登录=" + oneKeyFired
+                + " | 已填号=" + filledThisLogin);
         releaseCellular();
         removeOverlay();
         alert("自动登录未完成", reason);
@@ -326,6 +420,7 @@ public class AutoLoginService extends Service {
         io.execute(() -> {
             QlInfo qlInfo = loadQlInfo();
             if (qlInfo == null || StringUtils.isBlank(qlInfo.getToken())) {
+                LogUtil.e("未配置青龙面板或 token 为空，跳过推送");
                 main.post(() -> {
                     alert("京东CK已更新，但未配置青龙面板", "请打开 App 配置青龙面板地址与密钥");
                     updateForeground("登录成功，未配置青龙 · " + now());
@@ -333,16 +428,20 @@ public class AutoLoginService extends Service {
                 });
                 return;
             }
+            LogUtil.i("开始推送青龙: 地址=" + qlInfo.getAddress() + " pt_pin=" + LogUtil.mask(ptPin));
             try {
                 List<QlEnv> envList;
                 try {
                     envList = QinglongUtil.getEnvList(qlInfo, "");
                 } catch (IOException first) {
                     // 青龙 token 过期时用 client_id/client_secret 重新换一个
+                    LogUtil.i("青龙读取环境变量失败，尝试重新登录: " + first.getMessage());
                     qlInfo.setToken(QinglongUtil.login(qlInfo));
                     saveQlInfo(qlInfo);
+                    LogUtil.i("青龙重新登录成功，token=" + LogUtil.mask(qlInfo.getToken()));
                     envList = QinglongUtil.getEnvList(qlInfo, "");
                 }
+                LogUtil.i("青龙环境变量数量=" + envList.size());
                 QlEnv target = null;
                 for (QlEnv env : envList) {
                     Map<String, Object> envMap = JDUtil.formatCookies(env.getValue());
@@ -354,11 +453,15 @@ public class AutoLoginService extends Service {
                 if (target == null) {
                     target = new QlEnv();
                     target.setName("JD_COOKIE");
+                    LogUtil.i("青龙中没有该账号，新建环境变量");
+                } else {
+                    LogUtil.i("命中已有环境变量 name=" + target.getName());
                 }
                 target.setValue("pt_key=" + ptKey + ";pt_pin=" + ptPin + ";");
                 target.setRemarks(phoneOf(selectedAccount()));
                 QinglongUtil.saveEnv(qlInfo, target);
                 config.edit().putString(PK_LAST_UPLOADED, ptKey).apply();
+                LogUtil.i("青龙环境变量写入成功");
 
                 // 新建的环境变量需要再查一次拿到 id 才能启用
                 try {
@@ -366,10 +469,12 @@ public class AutoLoginService extends Service {
                         Map<String, Object> envMap = JDUtil.formatCookies(env.getValue());
                         if (ptPin.equals(envMap.get("pt_pin"))) {
                             QinglongUtil.EableEnv(qlInfo, env);
+                            LogUtil.i("青龙环境变量已启用");
                             break;
                         }
                     }
-                } catch (IOException ignored) {
+                } catch (IOException e) {
+                    LogUtil.e("青龙环境变量启用失败", e);
                 }
 
                 main.post(() -> {
@@ -378,6 +483,7 @@ public class AutoLoginService extends Service {
                     scheduleNext();
                 });
             } catch (IOException e) {
+                LogUtil.e("推送青龙失败: " + e.getMessage(), e);
                 main.post(() -> {
                     alert("写入青龙失败", "京东CK已更新，但推送青龙失败：" + e.getMessage());
                     updateForeground("推送青龙失败 · " + now());
@@ -419,8 +525,10 @@ public class AutoLoginService extends Service {
             Network active = connectivityManager.getActiveNetwork();
             NetworkCapabilities nc = connectivityManager.getNetworkCapabilities(active);
             if (nc != null && nc.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                LogUtil.i("当前已是移动数据，无需切换");
                 return;
             }
+            LogUtil.i("当前非移动数据(" + networkType() + ")，请求绑定蜂窝网络");
             NetworkRequest request = new NetworkRequest.Builder()
                     .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
                     .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
@@ -430,12 +538,15 @@ public class AutoLoginService extends Service {
                 public void onAvailable(@NonNull Network network) {
                     try {
                         connectivityManager.bindProcessToNetwork(network);
-                    } catch (Exception ignored) {
+                        LogUtil.i("已绑定蜂窝网络，网络=" + networkType());
+                    } catch (Exception e) {
+                        LogUtil.e("绑定蜂窝网络失败", e);
                     }
                 }
             };
             connectivityManager.requestNetwork(request, cellularCallback);
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            LogUtil.e("请求蜂窝网络失败", e);
         }
     }
 
@@ -480,10 +591,16 @@ public class AutoLoginService extends Service {
         settings.setUserAgentString(settings.getUserAgentString().replace("; wv", ""));
         webView.setWebViewClient(new WebViewClient() {
             @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                LogUtil.i("页面开始加载 " + url);
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
                 if (!loggingIn) {
                     return;
                 }
+                LogUtil.i("页面加载完成 " + url);
                 if (url != null && url.contains("plogin.m.jd.com") && !filledThisLogin) {
                     filledThisLogin = true;
                     view.evaluateJavascript(JsUtil.fillLoginJs(selectedAccount()), null);
@@ -491,18 +608,35 @@ public class AutoLoginService extends Service {
                 main.removeCallbacks(loginPoll);
                 main.postDelayed(loginPoll, 800);
             }
+
+            @Override
+            public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                LogUtil.e("页面加载失败 code=" + errorCode + " desc=" + description + " url=" + failingUrl);
+            }
+        });
+        webView.setWebChromeClient(new android.webkit.WebChromeClient() {
+            @Override
+            public boolean onConsoleMessage(android.webkit.ConsoleMessage msg) {
+                LogUtil.i("JS[" + msg.messageLevel() + "] " + msg.message()
+                        + " @" + msg.sourceId() + ":" + msg.lineNumber());
+                return true;
+            }
         });
     }
 
     /**
      * 1 像素透明悬浮窗，让 WebView 有窗口可渲染、可执行 JS，但用户看不到
      */
-    private void attachOverlay() {
-        if (overlayAttached || webView == null) {
-            return;
+    private boolean attachOverlay() {
+        if (overlayAttached) {
+            return true;
+        }
+        if (webView == null) {
+            return false;
         }
         if (!Settings.canDrawOverlays(this)) {
-            return;
+            LogUtil.e("缺少悬浮窗权限，WebView 无法渲染，自动登录大概率失败");
+            return false;
         }
         try {
             windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
@@ -523,8 +657,10 @@ public class AutoLoginService extends Service {
             params.alpha = 0.01f;
             windowManager.addView(webView, params);
             overlayAttached = true;
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            LogUtil.e("悬浮窗添加失败", e);
         }
+        return overlayAttached;
     }
 
     private void removeOverlay() {

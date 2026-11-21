@@ -27,6 +27,7 @@ import cn.xanderye.android.jdck.util.AppState;
 import cn.xanderye.android.jdck.util.CkSchedule;
 import cn.xanderye.android.jdck.util.JDUtil;
 import cn.xanderye.android.jdck.util.JsUtil;
+import cn.xanderye.android.jdck.util.LogUtil;
 import cn.xanderye.android.jdck.util.QinglongUtil;
 import com.alibaba.fastjson.JSON;
 import org.apache.commons.lang3.StringUtils;
@@ -84,6 +85,7 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         context = this;
+        LogUtil.init(this);
 
         // 配置存储
         config = getSharedPreferences("CONFIG", Context.MODE_PRIVATE);
@@ -375,6 +377,7 @@ public class MainActivity extends AppCompatActivity {
         menu.add(Menu.NONE, 2, 2, text);
         menu.add(Menu.NONE, 3, 3, "关于");
         menu.add(Menu.NONE, 4, 4, item4Text());
+        menu.add(Menu.NONE, 5, 5, "运行日志");
         return true;
     }
 
@@ -438,15 +441,24 @@ public class MainActivity extends AppCompatActivity {
             } break;
             case 3: {
                 AlertDialog.Builder builder = new AlertDialog.Builder(context);
-                builder.setMessage("@XanderYe 版权所有 @yclown修改");
+                builder.setTitle("关于");
+                builder.setMessage("京东CK自动维护（Eyzer 版）\n\n"
+                        + "作者：Eyzer\n"
+                        + "项目主页：https://github.com/Eyzer/jdck-android\n\n"
+                        + "功能：后台静默自动登录、Cookie 到期自动续期并推送青龙面板。\n"
+                        + "基于 XanderYe/jdck-android 与 yclown/ql_jd_cookie 修改。");
                 builder.setPositiveButton("项目页面", (dialog, which) -> {
-                    Uri uri = Uri.parse("https://github.com/yclown/jdck-android");
+                    Uri uri = Uri.parse("https://github.com/Eyzer/jdck-android");
                     Intent intent = new Intent();
                     intent.setAction("android.intent.action.VIEW");
                     intent.setData(uri);
                     startActivity(intent);
                 });
                 builder.create().show();
+            }
+            break;
+            case 5: {
+                showLogDialog();
             }
             break;
             case 4: {
@@ -467,6 +479,37 @@ public class MainActivity extends AppCompatActivity {
             break;
         }
         return true;
+    }
+
+    /**
+     * 运行日志：后台自动登录的每一步都写在这里，失败时先看它
+     */
+    private void showLogDialog() {
+        String log = LogUtil.read();
+        TextView textView = new TextView(this);
+        textView.setText(log);
+        textView.setTextSize(11);
+        textView.setTypeface(android.graphics.Typeface.MONOSPACE);
+        int pad = (int) (12 * getResources().getDisplayMetrics().density);
+        textView.setPadding(pad, pad, pad, pad);
+        textView.setTextIsSelectable(true);
+        ScrollView scrollView = new ScrollView(this);
+        scrollView.addView(textView);
+        new AlertDialog.Builder(this)
+                .setTitle("运行日志（最新在最后）")
+                .setView(scrollView)
+                .setPositiveButton("关闭", null)
+                .setNeutralButton("复制全部", (dialog, which) -> {
+                    android.content.ClipboardManager cm =
+                            (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("jdck-log", log));
+                    Toast.makeText(this, "日志已复制", Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("清空", (dialog, which) -> {
+                    LogUtil.clear();
+                    Toast.makeText(this, "日志已清空", Toast.LENGTH_SHORT).show();
+                })
+                .show();
     }
 
     /**
@@ -642,10 +685,12 @@ public class MainActivity extends AppCompatActivity {
             try {
                 boolean success = QinglongUtil.saveEnv(qlInfo, finalTargetEnv);
                 QinglongUtil.EableEnv(qlInfo,finalTargetEnv);
+                LogUtil.i("手动推送青龙 pt_pin=" + LogUtil.mask(ptPin) + " 结果=" + success);
                 if (success) {
                     Toast.makeText(this, "更新cookie成功", Toast.LENGTH_SHORT).show();
                 }
             } catch (IOException e) {
+                LogUtil.e("手动推送青龙失败", e);
                 Toast.makeText(this, e.getMessage(), Toast.LENGTH_SHORT).show();
             }
             Looper.loop();
