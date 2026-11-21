@@ -33,15 +33,33 @@ jobs:
           "$SDKM" "platforms;android-30" "build-tools;33.0.1" "platform-tools"
 
       - name: Build debug APK
+        id: build
+        continue-on-error: true
         run: |
           chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          set -o pipefail
+          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
+
+      # 编译失败时把关键错误打成注解，方便在 API / 页面上直接看到原因
+      - name: Report build errors
+        if: steps.build.outcome == 'failure'
+        run: |
+          echo "=== compile errors ==="
+          grep -nE "error:|e: |FAILURE:|What went wrong|Caused by|Could not|A problem occurred" build.log | head -n 60 > errors.txt || true
+          cat errors.txt
+          while IFS= read -r line; do
+            clean=$(printf '%s' "$line" | sed 's/%/%25/g; s/\r//g')
+            echo "::error::$clean"
+          done < errors.txt
+          exit 1
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: jdck-debug
-          path: app/build/outputs/apk/debug/*.apk
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            build.log
           if-no-files-found: warn
 
       # 发布到 Releases，手机点开直链即可下载安装
