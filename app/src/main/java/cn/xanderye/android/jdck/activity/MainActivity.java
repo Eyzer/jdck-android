@@ -269,18 +269,42 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         AppState.foreground = true;
         super.onResume();
+        if (webView != null) {
+            // 只恢复本实例，不要用 resumeTimers，那是进程级开关会把 Service 的页面一起唤醒
+            webView.onResume();
+        }
     }
 
     @Override
     protected void onPause() {
         AppState.foreground = false;
+        // 退到后台停止页面渲染，省渲染内存。注意不能用 pauseTimers：
+        // 那个接口是进程级的，会连带把后台服务里的登录页定时器一起暂停，导致自动登录卡死。
+        if (webView != null) {
+            webView.onPause();
+        }
         super.onPause();
     }
 
     @Override
     protected void onDestroy() {
         unregisterSMSReceiver();
-        uiHandler.removeCallbacks(oneKeyTask);
+        uiHandler.removeCallbacksAndMessages(null);
+        // 关键：静态单例手里攥着 WebView，等于把整个 Activity 和它的整棵 View 树一起留在内存里
+        Config.getInstance().setWebView(null);
+        if (webView != null) {
+            try {
+                // 先摘掉回调，避免销毁过程中再回调到已销毁的界面
+                webView.setWebViewClient(new WebViewClient());
+                webView.stopLoading();
+                webView.clearHistory();
+                webView.removeAllViews();
+                webView.destroy();
+            } catch (Throwable t) {
+                LogUtil.e("销毁界面 WebView 失败", t);
+            }
+            webView = null;
+        }
         super.onDestroy();
     }
 
@@ -324,7 +348,11 @@ public class MainActivity extends AppCompatActivity {
         }
         lastFilledUrl = url;
         // 等页面脚本渲染出输入框再填
-        uiHandler.postDelayed(() -> webView.evaluateJavascript(buildInputJs(selected), null), 500);
+        uiHandler.postDelayed(() -> {
+            if (webView != null) {
+                webView.evaluateJavascript(buildInputJs(selected), null);
+            }
+        }, 500);
     }
 
     /**
@@ -360,7 +388,7 @@ public class MainActivity extends AppCompatActivity {
     private final Runnable oneKeyTask = new Runnable() {
         @Override
         public void run() {
-            if (oneKeyTries++ >= 8) {
+            if (oneKeyTries++ >= 8 || webView == null) {
                 return;
             }
             webView.evaluateJavascript(oneKeyJs(), value -> {
@@ -632,20 +660,29 @@ public class MainActivity extends AppCompatActivity {
         QlInfo qlInfo = JSON.parseObject(qlJSON, QlInfo.class);
         ExecutorService singleThreadExecutor = Executors.newSingleThreadExecutor();
         singleThreadExecutor.execute(() -> {
-            Looper.prepare();
-
-
             try {
                 List<QlEnv> qlEnvList = QinglongUtil.getEnvList(qlInfo,"");
                 Config.getInstance().setQlEnvList(qlEnvList);
                 Config.getInstance().setQlInfo(qlInfo);
-                Toast.makeText(this, "青龙token有效", Toast.LENGTH_SHORT).show();
+                toastOnUi("青龙token有效");
             } catch (IOException e) {
-                Toast.makeText(this, "青龙token已失效，请重新登录", Toast.LENGTH_SHORT).show();
+                LogUtil.e("青龙token校验失败", e);
+                toastOnUi("青龙token已失效，请重新登录");
             }
-            Looper.loop();
         });
         singleThreadExecutor.shutdown();
+    }
+
+    /**
+     * 原来的写法在新线程里 Looper.prepare() + Looper.loop()，那个循环永远不会退出，
+     * 每调用一次就永久多一个阻塞线程。这里直接切回主线程弹提示。
+     */
+    private void toastOnUi(String text) {
+        runOnUiThread(() -> {
+            if (!isFinishing() && !isDestroyed()) {
+                Toast.makeText(MainActivity.this, text, Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 
     /**
@@ -681,19 +718,17 @@ public class MainActivity extends AppCompatActivity {
         ExecutorService singleThreadExecutor = Executors.newSingleThreadExecutor();
         QlEnv finalTargetEnv = targetEnv;
         singleThreadExecutor.execute(() -> {
-            Looper.prepare();
             try {
                 boolean success = QinglongUtil.saveEnv(qlInfo, finalTargetEnv);
                 QinglongUtil.EableEnv(qlInfo,finalTargetEnv);
                 LogUtil.i("手动推送青龙 pt_pin=" + LogUtil.mask(ptPin) + " 结果=" + success);
                 if (success) {
-                    Toast.makeText(this, "更新cookie成功", Toast.LENGTH_SHORT).show();
+                    toastOnUi("更新cookie成功");
                 }
             } catch (IOException e) {
                 LogUtil.e("手动推送青龙失败", e);
-                Toast.makeText(this, e.getMessage(), Toast.LENGTH_SHORT).show();
+                toastOnUi(e.getMessage());
             }
-            Looper.loop();
         });
         singleThreadExecutor.shutdown();
 

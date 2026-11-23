@@ -57,6 +57,9 @@ import java.util.concurrent.Executors;
  * -> 拿到新的 pt_key 后自动写入青龙面板。
  * <p>
  * 全部在 Service 里完成，不需要拉起界面，也就绕开了 Android 10+ 的后台启动界面限制。
+ * <p>
+ * 内存策略：WebView 只在真正需要登录时才创建，登录结束立刻销毁。
+ * 检测 CK 只读 CookieManager，不再为了检测白开一个 Chromium 实例。
  */
 public class AutoLoginService extends Service {
 
@@ -71,9 +74,20 @@ public class AutoLoginService extends Service {
     private static final String PK_LAST_COOKIE = "lastCookie";
 
     private static final long LOGIN_TIMEOUT_MS = 90 * 1000L;
-    private static final long POLL_INTERVAL_MS = 2000L;
+    private static final long POLL_INTERVAL_MS = 3000L;
 
     private static final String JD_URL = CkUtil.JD_URL;
+
+    /**
+     * 隐藏 WebView 不加载图片，省掉几十兆图片解码内存。
+     * 若某项运营商号码认证组件变成空白导致登录失败，把这里改成 false 再试。
+     */
+    private static final boolean BLOCK_IMAGES = true;
+
+    /**
+     * 悬浮窗高度占屏幕的比例。页面按正常宽度渲染，高度给够即可，不必全屏。
+     */
+    private static final float OVERLAY_HEIGHT_RATIO = 0.6f;
 
     private final Handler main = new Handler(Looper.getMainLooper());
 
@@ -96,6 +110,11 @@ public class AutoLoginService extends Service {
     private boolean filledThisLogin;
 
     private boolean oneKeyFired;
+
+    /**
+     * WebView 内核是否已被唤醒过。没唤醒过时读不到磁盘上的 Cookie。
+     */
+    private boolean cookieEngineWarmed;
 
     private String lastPageUrl = "";
 
@@ -143,7 +162,9 @@ public class AutoLoginService extends Service {
         } else {
             LogUtil.i("已有任务进行中，跳过本次触发");
         }
-        return START_STICKY;
+        // 不再用 START_STICKY：让系统随时可以回收本进程，下一次由定时闹钟拉起。
+        // 原来的 STICKY 会让进程被杀了又立刻重建，内存底座长期挂着不降。
+        return START_NOT_STICKY;
     }
 
     /**
@@ -202,11 +223,7 @@ public class AutoLoginService extends Service {
         LogUtil.i("服务销毁");
         main.removeCallbacksAndMessages(null);
         releaseCellular();
-        removeOverlay();
-        if (webView != null) {
-            webView.destroy();
-            webView = null;
-        }
+        destroyWebView();
         io.shutdownNow();
         super.onDestroy();
     }
@@ -216,10 +233,9 @@ public class AutoLoginService extends Service {
     private void runCheck() {
         checking = true;
         updateForeground("正在检测京东CK…");
-        ensureWebView();
-        LogUtil.i("开始检测CK");
-        // WebView 的 Cookie 库是异步初始化的，稍等一下再读，避免拿到空 Cookie 误判失效
-        main.postDelayed(this::doCheck, 800);
+        LogUtil.i("开始检测CK（只读 Cookie，不创建 WebView）");
+        // 纯读 Cookie + HTTP 校验，不需要 WebView，避免为了检测白开一个 Chromium 实例
+        main.postDelayed(this::doCheck, 300);
     }
 
     private void doCheck() {
@@ -269,12 +285,46 @@ public class AutoLoginService extends Service {
      * 优先取 WebView 里的 Cookie，取不到时用上次校验通过的快照
      */
     private String snapshotCookie() {
-        String cookie = CkUtil.currentCookie();
+        String cookie = readCookieSafe();
         Map<String, Object> map = JDUtil.formatCookies(cookie);
         if (StringUtils.isBlank((String) map.get("pt_key"))) {
             String saved = config.getString(PK_LAST_COOKIE, "");
             if (StringUtils.isNotBlank(saved)) {
                 return saved;
+            }
+        }
+        return cookie == null ? "" : cookie;
+    }
+
+    /**
+     * 读 Cookie 不依赖 WebView 实例。只有一种情况需要唤醒内核：
+     * 本地存过 Cookie 但内核还没初始化过（冷启动首次），此时磁盘上的 Cookie 读不出来，
+     * 不唤醒就会误判失效、白跑一次登录。
+     */
+    private String readCookieSafe() {
+        String cookie = "";
+        try {
+            cookie = CookieManager.getInstance().getCookie(JD_URL);
+        } catch (Exception e) {
+            LogUtil.e("读取Cookie失败", e);
+        }
+        if (StringUtils.isBlank(cookie) && !cookieEngineWarmed
+                && StringUtils.isNotBlank(config.getString(PK_LAST_COOKIE, ""))) {
+            cookieEngineWarmed = true;
+            WebView probe = null;
+            try {
+                probe = new WebView(getApplicationContext());
+                cookie = CookieManager.getInstance().getCookie(JD_URL);
+                LogUtil.i("已唤醒 WebView 内核读取磁盘 Cookie");
+            } catch (Throwable t) {
+                LogUtil.e("唤醒 WebView 内核失败", t);
+            } finally {
+                if (probe != null) {
+                    try {
+                        probe.destroy();
+                    } catch (Throwable ignored) {
+                    }
+                }
             }
         }
         return cookie == null ? "" : cookie;
@@ -288,6 +338,7 @@ public class AutoLoginService extends Service {
 
     private void startLogin() {
         loggingIn = true;
+        cookieEngineWarmed = true;
         filledThisLogin = false;
         oneKeyFired = false;
         lastPageUrl = "";
@@ -349,7 +400,7 @@ public class AutoLoginService extends Service {
 
             String account = selectedAccount();
             webView.evaluateJavascript(JsUtil.pageStateJs(), state -> {
-                if (!loggingIn) {
+                if (!loggingIn || webView == null) {
                     return;
                 }
                 String url = webView.getUrl();
@@ -393,7 +444,8 @@ public class AutoLoginService extends Service {
                 + " cookie长度=" + cookie.length());
         config.edit().putString(PK_LAST_COOKIE, cookie).apply();
         releaseCellular();
-        removeOverlay();
+        // 拿到 CK 就把页面和内嵌实例全放掉，后台不用再养着一个浏览器
+        destroyWebView();
         updateForeground("登录成功，正在写入青龙…");
         upload(cookie, ptPin, ptKey);
     }
@@ -408,7 +460,7 @@ public class AutoLoginService extends Service {
                 + " | 已触发一键登录=" + oneKeyFired
                 + " | 已填号=" + filledThisLogin);
         releaseCellular();
-        removeOverlay();
+        destroyWebView();
         alert("自动登录未完成", reason);
         updateForeground("自动登录失败 · " + now());
         scheduleNext();
@@ -587,6 +639,15 @@ public class AutoLoginService extends Service {
         settings.setDomStorageEnabled(true);
         settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
         settings.setLoadWithOverviewMode(true);
+        // 隐藏窗口没人看，图片一律不加载。京东登录页图片很多，这一项省内存最明显
+        if (BLOCK_IMAGES) {
+            settings.setLoadsImagesAutomatically(false);
+            settings.setBlockNetworkImage(true);
+        }
+        // 不预栅格化离屏内容，减少页面 tile 缓存
+        settings.setOffscreenPreRaster(false);
+        settings.setSupportZoom(false);
+        settings.setMediaPlaybackRequiresUserGesture(true);
         // 去掉 wv 标识，否则京东会判定为内嵌浏览器，不下发号码认证入口
         settings.setUserAgentString(settings.getUserAgentString().replace("; wv", ""));
         webView.setWebViewClient(new WebViewClient() {
@@ -625,7 +686,30 @@ public class AutoLoginService extends Service {
     }
 
     /**
-     * 1 像素透明悬浮窗，让 WebView 有窗口可渲染、可执行 JS，但用户看不到
+     * 彻底释放 WebView：先摘掉悬浮窗，再停加载、清历史、销毁实例。
+     * 这一步能把页面 DOM、CSSOM、JS 堆、图片解码全部还给系统。
+     */
+    private void destroyWebView() {
+        removeOverlay();
+        WebView victim = webView;
+        webView = null;
+        if (victim == null) {
+            return;
+        }
+        try {
+            victim.stopLoading();
+            victim.clearHistory();
+            victim.removeAllViews();
+            victim.destroy();
+            LogUtil.i("WebView 已销毁，页面内存已释放");
+        } catch (Throwable t) {
+            LogUtil.e("销毁 WebView 失败", t);
+        }
+    }
+
+    /**
+     * 半透明悬浮窗，让 WebView 有窗口可渲染、可执行 JS，但用户看不到。
+     * 只占屏幕上半部分，宽度保持全屏以保证页面按手机版排版，运营商认证组件不会变形。
      */
     private boolean attachOverlay() {
         if (overlayAttached) {
@@ -640,9 +724,12 @@ public class AutoLoginService extends Service {
         }
         try {
             windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+            int width = getResources().getDisplayMetrics().widthPixels;
+            int height = Math.max((int) (getResources().getDisplayMetrics().heightPixels
+                    * OVERLAY_HEIGHT_RATIO), 800);
             WindowManager.LayoutParams params = new WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.MATCH_PARENT,
+                    width,
+                    height,
                     Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                             ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
                             : WindowManager.LayoutParams.TYPE_PHONE,
