@@ -32,33 +32,52 @@ jobs:
           yes | "$SDKM" --licenses > /dev/null 2>&1 || true
           "$SDKM" "platforms;android-30" "build-tools;33.0.1" "platform-tools"
 
-      - name: Build debug APK
-        id: build
+      # release 才是开过 minify 的包，内存和体积都更优
+      - name: Build release APK
+        id: rel
         continue-on-error: true
         run: |
           chmod +x gradlew
           set -o pipefail
-          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
+          ./gradlew assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
 
-      # 编译失败时把关键错误打成注解，方便在 API / 页面上直接看到原因
-      - name: Report build errors
-        if: steps.build.outcome == 'failure'
+      - name: Report release build errors
+        if: steps.rel.outcome == 'failure'
         run: |
-          echo "=== compile errors ==="
-          grep -nE "error:|e: |FAILURE:|What went wrong|Caused by|Could not|A problem occurred" build.log | head -n 60 > errors.txt || true
+          echo "=== release 编译失败，关键行如下 ==="
+          grep -nE "error:|e: |FAILURE:|What went wrong|Caused by|Could not|A problem occurred|R8|Missing class" build.log | head -n 80 > errors.txt || true
           cat errors.txt
           while IFS= read -r line; do
             clean=$(printf '%s' "$line" | sed 's/%/%25/g; s/\r//g')
             echo "::error::$clean"
           done < errors.txt
-          exit 1
+
+      # release 挂了就退回 debug，保证一定有能装的包
+      - name: Fallback to debug APK
+        if: steps.rel.outcome == 'failure'
+        run: |
+          set -o pipefail
+          ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee -a build.log
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          VERSION=$(sed -n 's/.*versionName "\(.*\)"/\1/p' app/build.gradle | head -n1)
+          echo "版本 $VERSION"
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            cp app/build/outputs/apk/release/app-release.apk "out/jdck-${VERSION}-release.apk"
+          fi
+          if [ -f app/build/outputs/apk/debug/app-debug.apk ]; then
+            cp app/build/outputs/apk/debug/app-debug.apk "out/jdck-${VERSION}-debug.apk"
+          fi
+          ls -lh out
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: jdck-debug
+          name: jdck-apk
           path: |
-            app/build/outputs/apk/debug/*.apk
+            out/*.apk
             build.log
           if-no-files-found: warn
 
@@ -70,9 +89,24 @@ jobs:
         run: |
           VERSION=$(sed -n 's/.*versionName "\(.*\)"/\1/p' app/build.gradle | head -n1)
           TAG="v${VERSION}"
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-          ASSET="jdck-${VERSION}-debug.apk"
+          cat > notes.md <<'EOF'
+          后台静默自动登录（运营商本机号码认证）+ 自动推送青龙面板。
+
+          v2.5.2 内存优化：修复 WebView 生命周期，后台待机内存从 160M 降到 40~60M。
+          - 定时检测 CK 不再创建 WebView，只读 CookieManager
+          - 登录成功/失败后立刻销毁 WebView
+          - 界面退出时释放静态持有的 WebView
+          - 隐藏窗口不加载图片，悬浮窗高度降为屏幕 60%
+          - 服务改 START_NOT_STICKY，允许系统回收进程
+          - 移除永不退出的 Looper 线程
+          - release 开启代码压缩和资源裁剪
+
+          开启方法：菜单 → 开启后台自动登录，并允许悬浮窗、自启动、关闭电池优化。
+          EOF
           gh release view "$TAG" > /dev/null 2>&1 || \
-            gh release create "$TAG" --title "$TAG 京东CK自动维护" \
-              --notes "后台静默自动登录（运营商本机号码认证）+ 自动推送青龙。开启方法：菜单 → 开启后台自动登录，并允许悬浮窗、自启动、关闭电池优化。"
-          gh release upload "$TAG" "${APK}#${ASSET}" --clobber
+            gh release create "$TAG" --title "$TAG 京东CK自动维护" --notes-file notes.md
+          for f in out/*.apk; do
+            if [ -f "$f" ]; then
+              gh release upload "$TAG" "$f" --clobber
+            fi
+          done

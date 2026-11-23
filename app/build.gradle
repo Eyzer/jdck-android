@@ -20,6 +20,8 @@ android {
             minifyEnabled true
             shrinkResources true
             zipAlignEnabled true
+            // CI 里没有正式 keystore，用 debug 签名，保证 APK 能装、能覆盖旧版本
+            signingConfig signingConfigs.debug
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
